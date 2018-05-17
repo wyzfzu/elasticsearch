@@ -23,12 +23,13 @@ import org.apache.lucene.document.Field;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexableField;
+import org.apache.lucene.search.DocValuesFieldExistsQuery;
+import org.apache.lucene.search.Query;
 import org.apache.lucene.util.BytesRef;
 import org.elasticsearch.common.lucene.Lucene;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
-import org.elasticsearch.common.xcontent.XContentParserUtils;
 import org.elasticsearch.common.xcontent.support.XContentMapValues;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.index.fielddata.IndexFieldData;
@@ -41,6 +42,7 @@ import org.elasticsearch.index.mapper.MapperParsingException;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.ParseContext;
 import org.elasticsearch.index.mapper.StringFieldType;
+import org.elasticsearch.index.query.QueryShardContext;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -93,10 +95,6 @@ public final class ParentJoinFieldMapper extends FieldMapper {
         if (settings.getIndexMetaData().isRoutingPartitionedIndex()) {
             throw new IllegalStateException("cannot create join field [" + name + "] " +
                 "for the partitioned index " + "[" + settings.getIndex().getName() + "]");
-        }
-        if (settings.isSingleType() == false) {
-            throw new IllegalStateException("cannot create join field [" + name + "] " +
-                "on multi-types index [" + settings.getIndex().getName() + "]");
         }
     }
 
@@ -224,7 +222,7 @@ public final class ParentJoinFieldMapper extends FieldMapper {
         }
 
         @Override
-        public IndexFieldData.Builder fielddataBuilder() {
+        public IndexFieldData.Builder fielddataBuilder(String fullyQualifiedIndexName) {
             failIfNoDocValues();
             return new DocValuesIndexFieldData.Builder();
         }
@@ -236,6 +234,11 @@ public final class ParentJoinFieldMapper extends FieldMapper {
             }
             BytesRef binaryValue = (BytesRef) value;
             return binaryValue.utf8ToString();
+        }
+
+        @Override
+        public Query existsQuery(QueryShardContext context) {
+            return new DocValuesFieldExistsQuery(name());
         }
     }
 
@@ -250,7 +253,7 @@ public final class ParentJoinFieldMapper extends FieldMapper {
                                     MetaJoinFieldMapper uniqueFieldMapper,
                                     List<ParentIdFieldMapper> parentIdFields,
                                     boolean eagerGlobalOrdinals) {
-        super(simpleName, fieldType, Defaults.FIELD_TYPE, indexSettings, MultiFields.empty(), null);
+        super(simpleName, fieldType, Defaults.FIELD_TYPE, indexSettings, MultiFields.empty(), CopyTo.empty());
         this.parentIdFields = parentIdFields;
         this.uniqueFieldMapper = uniqueFieldMapper;
         this.uniqueFieldMapper.setFieldMapper(this);
@@ -309,8 +312,8 @@ public final class ParentJoinFieldMapper extends FieldMapper {
     }
 
     @Override
-    protected void doMerge(Mapper mergeWith, boolean updateAllTypes) {
-        super.doMerge(mergeWith, updateAllTypes);
+    protected void doMerge(Mapper mergeWith) {
+        super.doMerge(mergeWith);
         ParentJoinFieldMapper joinMergeWith = (ParentJoinFieldMapper) mergeWith;
         List<String> conflicts = new ArrayList<>();
         for (ParentIdFieldMapper mapper : parentIdFields) {
@@ -340,7 +343,7 @@ public final class ParentJoinFieldMapper extends FieldMapper {
                         conflicts.add("cannot remove child [" + child + "] in join field [" + name() + "]");
                     }
                 }
-                ParentIdFieldMapper merged = (ParentIdFieldMapper) self.merge(mergeWithMapper, updateAllTypes);
+                ParentIdFieldMapper merged = (ParentIdFieldMapper) self.merge(mergeWithMapper);
                 newParentIdFields.add(merged);
             }
         }
@@ -349,7 +352,7 @@ public final class ParentJoinFieldMapper extends FieldMapper {
         }
         this.eagerGlobalOrdinals = joinMergeWith.eagerGlobalOrdinals;
         this.parentIdFields = Collections.unmodifiableList(newParentIdFields);
-        this.uniqueFieldMapper = (MetaJoinFieldMapper) uniqueFieldMapper.merge(joinMergeWith.uniqueFieldMapper, updateAllTypes);
+        this.uniqueFieldMapper = (MetaJoinFieldMapper) uniqueFieldMapper.merge(joinMergeWith.uniqueFieldMapper);
         uniqueFieldMapper.setFieldMapper(this);
     }
 
@@ -387,6 +390,12 @@ public final class ParentJoinFieldMapper extends FieldMapper {
                         name = context.parser().text();
                     } else if ("parent".equals(currentFieldName)) {
                         parent = context.parser().text();
+                    } else {
+                        throw new IllegalArgumentException("unknown field name [" + currentFieldName + "] in join field [" + name() + "]");
+                    }
+                } else if (token == XContentParser.Token.VALUE_NUMBER) {
+                    if ("parent".equals(currentFieldName)) {
+                        parent = context.parser().numberValue().toString();
                     } else {
                         throw new IllegalArgumentException("unknown field name [" + currentFieldName + "] in join field [" + name() + "]");
                     }

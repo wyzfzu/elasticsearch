@@ -19,6 +19,8 @@
 
 package org.elasticsearch.test;
 
+import org.elasticsearch.common.bytes.BytesReference;
+import org.elasticsearch.common.xcontent.DeprecationHandler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
@@ -61,7 +63,7 @@ public class XContentTestUtilsTests extends ESTestCase {
             builder.startObject("inner1");
             {
                 builder.field("inner1field1", "value");
-                builder.startObject("inner2");
+                builder.startObject("inn.er2");
                 {
                     builder.field("inner2field1", "value");
                 }
@@ -71,7 +73,8 @@ public class XContentTestUtilsTests extends ESTestCase {
         }
         builder.endObject();
 
-        try (XContentParser parser = XContentHelper.createParser(NamedXContentRegistry.EMPTY, builder.bytes(), builder.contentType())) {
+        try (XContentParser parser = XContentHelper.createParser(NamedXContentRegistry.EMPTY,
+            DeprecationHandler.THROW_UNSUPPORTED_OPERATION, BytesReference.bytes(builder), builder.contentType())) {
             parser.nextToken();
             List<String> insertPaths = XContentTestUtils.getInsertPaths(parser, new Stack<>());
             assertEquals(5, insertPaths.size());
@@ -79,7 +82,7 @@ public class XContentTestUtilsTests extends ESTestCase {
             assertThat(insertPaths, hasItem(equalTo("list1.2")));
             assertThat(insertPaths, hasItem(equalTo("list1.4")));
             assertThat(insertPaths, hasItem(equalTo("inner1")));
-            assertThat(insertPaths, hasItem(equalTo("inner1.inner2")));
+            assertThat(insertPaths, hasItem(equalTo("inner1.inn\\.er2")));
         }
     }
 
@@ -88,20 +91,21 @@ public class XContentTestUtilsTests extends ESTestCase {
         XContentBuilder builder = JsonXContent.contentBuilder();
         builder.startObject();
         builder.endObject();
-        builder = XContentTestUtils.insertIntoXContent(XContentType.JSON.xContent(), builder.bytes(), Collections.singletonList(""),
-                () -> "inner1", () -> new HashMap<>());
-        builder = XContentTestUtils.insertIntoXContent(XContentType.JSON.xContent(), builder.bytes(), Collections.singletonList(""),
-                () -> "field1", () -> "value1");
-        builder = XContentTestUtils.insertIntoXContent(XContentType.JSON.xContent(), builder.bytes(), Collections.singletonList("inner1"),
-                () -> "inner2", () -> new HashMap<>());
-        builder = XContentTestUtils.insertIntoXContent(XContentType.JSON.xContent(), builder.bytes(), Collections.singletonList("inner1"),
-                () -> "field2", () -> "value2");
-        try (XContentParser parser = XContentHelper.createParser(NamedXContentRegistry.EMPTY, builder.bytes(), builder.contentType())) {
+        builder = XContentTestUtils.insertIntoXContent(XContentType.JSON.xContent(), BytesReference.bytes(builder),
+                Collections.singletonList(""), () -> "inn.er1", () -> new HashMap<>());
+        builder = XContentTestUtils.insertIntoXContent(XContentType.JSON.xContent(), BytesReference.bytes(builder),
+                Collections.singletonList(""), () -> "field1", () -> "value1");
+        builder = XContentTestUtils.insertIntoXContent(XContentType.JSON.xContent(), BytesReference.bytes(builder),
+                Collections.singletonList("inn\\.er1"), () -> "inner2", () -> new HashMap<>());
+        builder = XContentTestUtils.insertIntoXContent(XContentType.JSON.xContent(), BytesReference.bytes(builder),
+                Collections.singletonList("inn\\.er1"), () -> "field2", () -> "value2");
+        try (XContentParser parser = XContentHelper.createParser(NamedXContentRegistry.EMPTY,
+            DeprecationHandler.THROW_UNSUPPORTED_OPERATION, BytesReference.bytes(builder), builder.contentType())) {
             Map<String, Object> map = parser.map();
             assertEquals(2, map.size());
             assertEquals("value1", map.get("field1"));
-            assertThat(map.get("inner1"), instanceOf(Map.class));
-            Map<String, Object> innerMap = (Map<String, Object>) map.get("inner1");
+            assertThat(map.get("inn.er1"), instanceOf(Map.class));
+            Map<String, Object> innerMap = (Map<String, Object>) map.get("inn.er1");
             assertEquals(2, innerMap.size());
             assertEquals("value2", innerMap.get("field2"));
             assertThat(innerMap.get("inner2"), instanceOf(Map.class));
@@ -145,7 +149,7 @@ public class XContentTestUtilsTests extends ESTestCase {
         Map<String, Object> resultMap;
 
         try (XContentParser parser = createParser(XContentType.JSON.xContent(),
-                insertRandomFields(builder.contentType(), builder.bytes(), null, random()))) {
+                insertRandomFields(builder.contentType(), BytesReference.bytes(builder), null, random()))) {
             resultMap = parser.map();
         }
         assertEquals(5, resultMap.keySet().size());
@@ -159,7 +163,7 @@ public class XContentTestUtilsTests extends ESTestCase {
 
         Predicate<String> pathsToExclude = path -> path.endsWith("foo1");
         try (XContentParser parser = createParser(XContentType.JSON.xContent(),
-                insertRandomFields(builder.contentType(), builder.bytes(), pathsToExclude, random()))) {
+                insertRandomFields(builder.contentType(), BytesReference.bytes(builder), pathsToExclude, random()))) {
             resultMap = parser.map();
         }
         assertEquals(5, resultMap.keySet().size());
@@ -173,7 +177,7 @@ public class XContentTestUtilsTests extends ESTestCase {
 
         pathsToExclude = path -> path.contains("foo1");
         try (XContentParser parser = createParser(XContentType.JSON.xContent(),
-                insertRandomFields(builder.contentType(), builder.bytes(), pathsToExclude, random()))) {
+                insertRandomFields(builder.contentType(), BytesReference.bytes(builder), pathsToExclude, random()))) {
             resultMap = parser.map();
         }
         assertEquals(5, resultMap.keySet().size());

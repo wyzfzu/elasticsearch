@@ -1,3 +1,4 @@
+[[painless-operators]]
 === Operators
 
 The following is a table of the available operators in Painless.  Each operator will have further information and examples outside of the table.  Many operators will have a promotion table as described by the documentation on promotion [MARK].
@@ -660,7 +661,7 @@ Note that def types will be assumed to be of the boolean type.  Any def type eva
 *Examples:*
 [source,Java]
 ----
-boolean x = !false; // declares the boolean variable x and sets it to the the opposite of the false value
+boolean x = !false; // declares the boolean variable x and sets it to the opposite of the false value
 boolean y = !x;     // declares the boolean variable y and sets it to the opposite of the boolean variable x
 def z = !y;         // declares the def variable z and sets it to the opposite of the boolean variable y
 ----
@@ -703,6 +704,7 @@ e = ~d;      // sets e the negation of d
 
 The cast operator can be used to explicitly convert one type to another.  See casting [MARK] for more information.
 
+[[constructor-call]]
 ==== Constructor Call
 
 A constructor call is a special type of method call [MARK] used to allocate a reference type instance using the new operator.  The format is the new operator followed by a type, an opening parenthesis, arguments if any, and a closing parenthesis.  Arguments are a series of zero-to-many expressions delimited by commas.  Auto-boxing and auto-unboxing will be applied automatically for arguments passed into a constructor call.  See boxing and unboxing [MARK] for more information on this topic.  Constructor argument types can always be resolved at run-time; if appropriate type conversions (casting) cannot be applied an error will occur.  Once a reference type instance has been allocated, its members may be used as part of other expressions.
@@ -1700,10 +1702,10 @@ elvis: expression '?:' expression;
 *Examples:*
 [source,Java]
 ----
-List l = new ArrayList();     // declares the List variable l and sets it to a newly allocated ArrayList
-List y = l : new ArrayList(); // declares the List variable y and sets it to l since l is not null
-y = null;                     // sets y to null
-def z = y ?: new HashMap();   // declares the def variable z and sets it to a newly allocated HashMap since y is null
+List l = new ArrayList();      // declares the List variable l and sets it to a newly allocated ArrayList
+List y = l ?: new ArrayList(); // declares the List variable y and sets it to l since l is not null
+y = null;                      // sets y to null
+def z = y ?: new HashMap();    // declares the def variable z and sets it to a newly allocated HashMap since y is null
 ----
 
 ==== Assignment

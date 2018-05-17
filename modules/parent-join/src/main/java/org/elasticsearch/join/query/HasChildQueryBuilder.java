@@ -20,7 +20,7 @@ package org.elasticsearch.join.query;
 
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexReader;
-import org.apache.lucene.index.MultiDocValues;
+import org.apache.lucene.index.OrdinalMap;
 import org.apache.lucene.search.IndexSearcher;
 import org.apache.lucene.search.MatchNoDocsQuery;
 import org.apache.lucene.search.Query;
@@ -37,15 +37,12 @@ import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.fielddata.IndexOrdinalsFieldData;
 import org.elasticsearch.index.fielddata.plain.SortedSetDVOrdinalsIndexFieldData;
-import org.elasticsearch.index.mapper.DocumentMapper;
 import org.elasticsearch.index.mapper.MappedFieldType;
-import org.elasticsearch.index.mapper.ParentFieldMapper;
 import org.elasticsearch.index.query.AbstractQueryBuilder;
 import org.elasticsearch.index.query.InnerHitBuilder;
 import org.elasticsearch.index.query.InnerHitContextBuilder;
 import org.elasticsearch.index.query.NestedQueryBuilder;
 import org.elasticsearch.index.query.QueryBuilder;
-import org.elasticsearch.index.query.QueryParseContext;
 import org.elasticsearch.index.query.QueryRewriteContext;
 import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.index.query.QueryShardException;
@@ -58,7 +55,7 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * A query builder for <tt>has_child</tt> query.
+ * A query builder for {@code has_child} query.
  */
 public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuilder> {
     public static final String NAME = "has_child";
@@ -77,8 +74,8 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
      */
     public static final boolean DEFAULT_IGNORE_UNMAPPED = false;
 
-    private static final ParseField QUERY_FIELD = new ParseField("query", "filter");
-    private static final ParseField TYPE_FIELD = new ParseField("type", "child_type");
+    private static final ParseField QUERY_FIELD = new ParseField("query");
+    private static final ParseField TYPE_FIELD = new ParseField("type");
     private static final ParseField MAX_CHILDREN_FIELD = new ParseField("max_children");
     private static final ParseField MIN_CHILDREN_FIELD = new ParseField("min_children");
     private static final ParseField SCORE_MODE_FIELD = new ParseField("score_mode");
@@ -168,6 +165,7 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
 
     public HasChildQueryBuilder innerHit(InnerHitBuilder innerHit) {
         this.innerHitBuilder = innerHit;
+        innerHitBuilder.setIgnoreUnmapped(ignoreUnmapped);
         return this;
     }
 
@@ -213,6 +211,9 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
      */
     public HasChildQueryBuilder ignoreUnmapped(boolean ignoreUnmapped) {
         this.ignoreUnmapped = ignoreUnmapped;
+        if (innerHitBuilder!= null ){
+            innerHitBuilder.setIgnoreUnmapped(ignoreUnmapped);
+        }
         return this;
     }
 
@@ -242,8 +243,7 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
         builder.endObject();
     }
 
-    public static HasChildQueryBuilder fromXContent(QueryParseContext parseContext) throws IOException {
-        XContentParser parser = parseContext.parser();
+    public static HasChildQueryBuilder fromXContent(XContentParser parser) throws IOException {
         float boost = AbstractQueryBuilder.DEFAULT_BOOST;
         String childType = null;
         ScoreMode scoreMode = ScoreMode.None;
@@ -258,30 +258,28 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
         while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
             if (token == XContentParser.Token.FIELD_NAME) {
                 currentFieldName = parser.currentName();
-            } else if (parseContext.isDeprecatedSetting(currentFieldName)) {
-                // skip
             } else if (token == XContentParser.Token.START_OBJECT) {
-                if (QUERY_FIELD.match(currentFieldName)) {
-                    iqb = parseContext.parseInnerQueryBuilder();
-                } else if (INNER_HITS_FIELD.match(currentFieldName)) {
-                    innerHitBuilder = InnerHitBuilder.fromXContent(parseContext);
+                if (QUERY_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
+                    iqb = parseInnerQueryBuilder(parser);
+                } else if (INNER_HITS_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
+                    innerHitBuilder = InnerHitBuilder.fromXContent(parser);
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "[has_child] query does not support [" + currentFieldName + "]");
                 }
             } else if (token.isValue()) {
-                if (TYPE_FIELD.match(currentFieldName)) {
+                if (TYPE_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     childType = parser.text();
-                } else if (SCORE_MODE_FIELD.match(currentFieldName)) {
+                } else if (SCORE_MODE_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     scoreMode = NestedQueryBuilder.parseScoreMode(parser.text());
-                } else if (AbstractQueryBuilder.BOOST_FIELD.match(currentFieldName)) {
+                } else if (AbstractQueryBuilder.BOOST_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     boost = parser.floatValue();
-                } else if (MIN_CHILDREN_FIELD.match(currentFieldName)) {
+                } else if (MIN_CHILDREN_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     minChildren = parser.intValue(true);
-                } else if (MAX_CHILDREN_FIELD.match(currentFieldName)) {
+                } else if (MAX_CHILDREN_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     maxChildren = parser.intValue(true);
-                } else if (IGNORE_UNMAPPED_FIELD.match(currentFieldName)) {
+                } else if (IGNORE_UNMAPPED_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     ignoreUnmapped = parser.booleanValue();
-                } else if (AbstractQueryBuilder.NAME_FIELD.match(currentFieldName)) {
+                } else if (AbstractQueryBuilder.NAME_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     queryName = parser.text();
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "[has_child] query does not support [" + currentFieldName + "]");
@@ -295,7 +293,6 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
         hasChildQueryBuilder.ignoreUnmapped(ignoreUnmapped);
         if (innerHitBuilder != null) {
             hasChildQueryBuilder.innerHit(innerHitBuilder);
-            hasChildQueryBuilder.ignoreUnmapped(ignoreUnmapped);
         }
         return hasChildQueryBuilder;
     }
@@ -307,14 +304,6 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
 
     @Override
     protected Query doToQuery(QueryShardContext context) throws IOException {
-        if (context.getIndexSettings().isSingleType()) {
-            return joinFieldDoToQuery(context);
-        } else {
-            return parentFieldDoToQuery(context);
-        }
-    }
-
-    private Query joinFieldDoToQuery(QueryShardContext context) throws IOException {
         ParentJoinFieldMapper joinFieldMapper = ParentJoinFieldMapper.getMapper(context.getMapperService());
         if (joinFieldMapper == null) {
             if (ignoreUnmapped) {
@@ -343,52 +332,14 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
         }
     }
 
-    private Query parentFieldDoToQuery(QueryShardContext context) throws IOException {
-        Query innerQuery;
-        final String[] previousTypes = context.getTypes();
-        context.setTypes(type);
-        try {
-            innerQuery = query.toQuery(context);
-        } finally {
-            context.setTypes(previousTypes);
-        }
-        DocumentMapper childDocMapper = context.getMapperService().documentMapper(type);
-        if (childDocMapper == null) {
-            if (ignoreUnmapped) {
-                return new MatchNoDocsQuery();
-            } else {
-                throw new QueryShardException(context, "[" + NAME + "] no mapping found for type [" + type + "]");
-            }
-        }
-        ParentFieldMapper parentFieldMapper = childDocMapper.parentFieldMapper();
-        if (parentFieldMapper.active() == false) {
-            throw new QueryShardException(context, "[" + NAME + "] _parent field has no parent type configured");
-        }
-        String parentType = parentFieldMapper.type();
-        DocumentMapper parentDocMapper = context.getMapperService().documentMapper(parentType);
-        if (parentDocMapper == null) {
-            throw new QueryShardException(context,
-                "[" + NAME + "] Type [" + type + "] points to a non existent parent type [" + parentType + "]");
-        }
-
-        // wrap the query with type query
-        innerQuery = Queries.filtered(innerQuery, childDocMapper.typeFilter(context));
-
-        String joinField = ParentFieldMapper.joinField(parentType);
-        final MappedFieldType parentFieldType = parentDocMapper.parentFieldMapper().getParentJoinFieldType();
-        final SortedSetDVOrdinalsIndexFieldData fieldData = context.getForField(parentFieldType);
-        return new LateParsingQuery(parentDocMapper.typeFilter(context), innerQuery, minChildren(), maxChildren(),
-            joinField, scoreMode, fieldData, context.getSearchSimilarity());
-    }
-
     /**
      * A query that rewrites into another query using
-     * {@link JoinUtil#createJoinQuery(String, Query, Query, IndexSearcher, ScoreMode, MultiDocValues.OrdinalMap, int, int)}
+     * {@link JoinUtil#createJoinQuery(String, Query, Query, IndexSearcher, ScoreMode, OrdinalMap, int, int)}
      * that executes the actual join.
      *
      * This query is exclusively used by the {@link HasChildQueryBuilder} and {@link HasParentQueryBuilder} to get access
-     * to the {@link DirectoryReader} used by the current search in order to retrieve the {@link MultiDocValues.OrdinalMap}.
-     * The {@link MultiDocValues.OrdinalMap} is required by {@link JoinUtil} to execute the join.
+     * to the {@link DirectoryReader} used by the current search in order to retrieve the {@link OrdinalMap}.
+     * The {@link OrdinalMap} is required by {@link JoinUtil} to execute the join.
      */
     // TODO: Find a way to remove this query and let doToQuery(...) just return the query from JoinUtil.createJoinQuery(...)
     public static final class LateParsingQuery extends Query {
@@ -426,7 +377,7 @@ public class HasChildQueryBuilder extends AbstractQueryBuilder<HasChildQueryBuil
                 indexSearcher.setQueryCache(null);
                 indexSearcher.setSimilarity(similarity);
                 IndexOrdinalsFieldData indexParentChildFieldData = fieldDataJoin.loadGlobal((DirectoryReader) reader);
-                MultiDocValues.OrdinalMap ordinalMap = indexParentChildFieldData.getOrdinalMap();
+                OrdinalMap ordinalMap = indexParentChildFieldData.getOrdinalMap();
                 return JoinUtil.createJoinQuery(joinField, innerQuery, toQuery, indexSearcher, scoreMode,
                     ordinalMap, minChildren, maxChildren);
             } else {

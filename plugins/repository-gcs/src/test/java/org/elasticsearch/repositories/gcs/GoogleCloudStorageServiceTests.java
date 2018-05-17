@@ -19,44 +19,65 @@
 
 package org.elasticsearch.repositories.gcs;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Collections;
-import java.util.Map;
+import com.google.auth.Credentials;
+import com.google.cloud.http.HttpTransportOptions;
+import com.google.cloud.storage.Storage;
 
-import com.google.api.client.googleapis.auth.oauth2.GoogleCredential;
+import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.unit.TimeValue;
 import org.elasticsearch.env.Environment;
-import org.elasticsearch.repositories.gcs.GoogleCloudStorageService.InternalGoogleCloudStorageService;
 import org.elasticsearch.test.ESTestCase;
+import org.hamcrest.Matchers;
+import java.util.Collections;
+import java.util.Locale;
 
-import static org.hamcrest.Matchers.containsString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 public class GoogleCloudStorageServiceTests extends ESTestCase {
 
-    private InputStream getDummyCredentialStream() throws IOException {
-        return GoogleCloudStorageServiceTests.class.getResourceAsStream("/dummy-account.json");
+    public void testClientInitializer() throws Exception {
+        final String clientName = randomAlphaOfLength(4).toLowerCase(Locale.ROOT);
+        final Environment environment = mock(Environment.class);
+        final TimeValue connectTimeValue = TimeValue.timeValueNanos(randomIntBetween(0, 2000000));
+        final TimeValue readTimeValue = TimeValue.timeValueNanos(randomIntBetween(0, 2000000));
+        final String applicationName = randomAlphaOfLength(4);
+        final String hostName = randomFrom("http://", "https://") + randomAlphaOfLength(4) + ":" + randomIntBetween(1, 65535);
+        final String projectIdName = randomAlphaOfLength(4);
+        final Settings settings = Settings.builder()
+                .put(GoogleCloudStorageClientSettings.CONNECT_TIMEOUT_SETTING.getConcreteSettingForNamespace(clientName).getKey(),
+                        connectTimeValue.getStringRep())
+                .put(GoogleCloudStorageClientSettings.READ_TIMEOUT_SETTING.getConcreteSettingForNamespace(clientName).getKey(),
+                        readTimeValue.getStringRep())
+                .put(GoogleCloudStorageClientSettings.APPLICATION_NAME_SETTING.getConcreteSettingForNamespace(clientName).getKey(),
+                        applicationName)
+                .put(GoogleCloudStorageClientSettings.ENDPOINT_SETTING.getConcreteSettingForNamespace(clientName).getKey(), hostName)
+                .put(GoogleCloudStorageClientSettings.PROJECT_ID_SETTING.getConcreteSettingForNamespace(clientName).getKey(), projectIdName)
+                .build();
+        when(environment.settings()).thenReturn(settings);
+        final GoogleCloudStorageClientSettings clientSettings = GoogleCloudStorageClientSettings.getClientSettings(settings, clientName);
+        final GoogleCloudStorageService service = new GoogleCloudStorageService(environment,
+                Collections.singletonMap(clientName, clientSettings));
+        final IllegalArgumentException e = expectThrows(IllegalArgumentException.class, () -> service.createClient("another_client"));
+        assertThat(e.getMessage(), Matchers.startsWith("Unknown client name"));
+        assertSettingDeprecationsAndWarnings(
+                new Setting<?>[] { GoogleCloudStorageClientSettings.APPLICATION_NAME_SETTING.getConcreteSettingForNamespace(clientName) });
+        final Storage storage = service.createClient(clientName);
+        assertThat(storage.getOptions().getApplicationName(), Matchers.containsString(applicationName));
+        assertThat(storage.getOptions().getHost(), Matchers.is(hostName));
+        assertThat(storage.getOptions().getProjectId(), Matchers.is(projectIdName));
+        assertThat(storage.getOptions().getTransportOptions(), Matchers.instanceOf(HttpTransportOptions.class));
+        assertThat(((HttpTransportOptions) storage.getOptions().getTransportOptions()).getConnectTimeout(),
+                Matchers.is((int) connectTimeValue.millis()));
+        assertThat(((HttpTransportOptions) storage.getOptions().getTransportOptions()).getReadTimeout(),
+                Matchers.is((int) readTimeValue.millis()));
+        assertThat(storage.getOptions().getCredentials(), Matchers.nullValue(Credentials.class));
     }
 
-    public void testDefaultCredential() throws Exception {
-        Environment env = new Environment(Settings.builder().put("path.home", createTempDir()).build());
-        GoogleCredential cred = GoogleCredential.fromStream(getDummyCredentialStream());
-        InternalGoogleCloudStorageService service = new InternalGoogleCloudStorageService(env, Collections.emptyMap()) {
-            @Override
-            GoogleCredential getDefaultCredential() throws IOException {
-                return cred;
-            }
-        };
-        assertSame(cred, service.getCredential("default"));
-    }
-
-    public void testClientCredential() throws Exception {
-        GoogleCredential cred = GoogleCredential.fromStream(getDummyCredentialStream());
-        Map<String, GoogleCredential> credentials = Collections.singletonMap("clientname", cred);
-        Environment env = new Environment(Settings.builder().put("path.home", createTempDir()).build());
-        InternalGoogleCloudStorageService service = new InternalGoogleCloudStorageService(env, credentials);
-        assertSame(cred, service.getCredential("clientname"));
+    public void testToTimeout() {
+        assertEquals(-1, GoogleCloudStorageService.toTimeout(null).intValue());
+        assertEquals(-1, GoogleCloudStorageService.toTimeout(TimeValue.ZERO).intValue());
+        assertEquals(0, GoogleCloudStorageService.toTimeout(TimeValue.MINUS_ONE).intValue());
     }
 }

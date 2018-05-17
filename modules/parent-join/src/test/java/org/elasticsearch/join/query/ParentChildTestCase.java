@@ -19,6 +19,7 @@
 package org.elasticsearch.join.query;
 
 import org.elasticsearch.action.index.IndexRequestBuilder;
+import org.elasticsearch.common.Strings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentHelper;
@@ -27,8 +28,10 @@ import org.elasticsearch.index.IndexModule;
 import org.elasticsearch.join.ParentJoinPlugin;
 import org.elasticsearch.plugins.Plugin;
 import org.elasticsearch.test.ESIntegTestCase;
+import org.elasticsearch.test.InternalSettingsPlugin;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -44,7 +47,7 @@ public abstract class ParentChildTestCase extends ESIntegTestCase {
 
     @Override
     protected Collection<Class<? extends Plugin>> nodePlugins() {
-        return Collections.singleton(ParentJoinPlugin.class);
+        return Arrays.asList(InternalSettingsPlugin.class, ParentJoinPlugin.class);
     }
 
     @Override
@@ -59,15 +62,7 @@ public abstract class ParentChildTestCase extends ESIntegTestCase {
             .put(IndexModule.INDEX_QUERY_CACHE_ENABLED_SETTING.getKey(), true)
             .put(IndexModule.INDEX_QUERY_CACHE_EVERYTHING_SETTING.getKey(), true);
 
-        if (legacy()) {
-            builder.put("index.mapping.single_type", false);
-        }
-
         return builder.build();
-    }
-
-    protected boolean legacy() {
-        return false;
     }
 
     protected IndexRequestBuilder createIndexRequest(String index, String type, String id, String parentId, Object... fields) {
@@ -80,7 +75,7 @@ public abstract class ParentChildTestCase extends ESIntegTestCase {
 
     protected IndexRequestBuilder createIndexRequest(String index, String type, String id, String parentId,
                                                    XContentBuilder builder) throws IOException {
-        Map<String, Object> source = XContentHelper.convertToMap(JsonXContent.jsonXContent, builder.string(), false);
+        Map<String, Object> source = XContentHelper.convertToMap(JsonXContent.jsonXContent, Strings.toString(builder), false);
         return createIndexRequest(index, type, id, parentId, source);
     }
 
@@ -119,28 +114,19 @@ public abstract class ParentChildTestCase extends ESIntegTestCase {
 
     private IndexRequestBuilder createIndexRequest(String index, String type, String id, String parentId, Map<String, Object> source) {
         String name = type;
-        if (legacy() == false) {
-            type = "doc";
-        }
+        type = "doc";
 
         IndexRequestBuilder indexRequestBuilder = client().prepareIndex(index, type, id);
-        if (legacy()) {
-            if (parentId != null) {
-                indexRequestBuilder.setParent(parentId);
-            }
-            indexRequestBuilder.setSource(source);
+        Map<String, Object> joinField = new HashMap<>();
+        if (parentId != null) {
+            joinField.put("name", name);
+            joinField.put("parent", parentId);
+            indexRequestBuilder.setRouting(parentId);
         } else {
-            Map<String, Object> joinField = new HashMap<>();
-            if (parentId != null) {
-                joinField.put("name", name);
-                joinField.put("parent", parentId);
-                indexRequestBuilder.setRouting(parentId);
-            } else {
-                joinField.put("name", name);
-            }
-            source.put("join_field", joinField);
-            indexRequestBuilder.setSource(source);
+            joinField.put("name", name);
         }
+        source.put("join_field", joinField);
+        indexRequestBuilder.setSource(source);
         return indexRequestBuilder;
     }
 

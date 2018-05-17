@@ -20,8 +20,11 @@ package org.elasticsearch.gradle.test
 
 import org.apache.tools.ant.DefaultLogger
 import org.apache.tools.ant.taskdefs.condition.Os
+import org.elasticsearch.gradle.BuildPlugin
 import org.elasticsearch.gradle.LoggedExec
+import org.elasticsearch.gradle.Version
 import org.elasticsearch.gradle.VersionProperties
+import org.elasticsearch.gradle.plugin.MetaPluginBuildPlugin
 import org.elasticsearch.gradle.plugin.PluginBuildPlugin
 import org.elasticsearch.gradle.plugin.PluginPropertiesExtension
 import org.gradle.api.AntBuilder
@@ -96,8 +99,8 @@ class ClusterFormationTasks {
             // from mirrors using gradles built-in mechanism etc.
 
             configureDistributionDependency(project, config.distribution, bwcDistro, config.bwcVersion)
-            for (Map.Entry<String, Project> entry : config.plugins.entrySet()) {
-                configureBwcPluginDependency("${prefix}_elasticsearchBwcPlugins", project, entry.getValue(), bwcPlugins, config.bwcVersion)
+            for (Map.Entry<String, Object> entry : config.plugins.entrySet()) {
+                configureBwcPluginDependency(project, entry.getValue(), bwcPlugins, config.bwcVersion)
             }
             bwcDistro.resolutionStrategy.cacheChangingModulesFor(0, TimeUnit.SECONDS)
             bwcPlugins.resolutionStrategy.cacheChangingModulesFor(0, TimeUnit.SECONDS)
@@ -105,11 +108,14 @@ class ClusterFormationTasks {
         for (int i = 0; i < config.numNodes; i++) {
             // we start N nodes and out of these N nodes there might be M bwc nodes.
             // for each of those nodes we might have a different configuration
-            String elasticsearchVersion = VersionProperties.elasticsearch
-            Configuration distro = currentDistro
+            final Configuration distro
+            final Version elasticsearchVersion
             if (i < config.numBwcNodes) {
                 elasticsearchVersion = config.bwcVersion
                 distro = bwcDistro
+            } else {
+                elasticsearchVersion = VersionProperties.elasticsearch
+                distro = currentDistro
             }
             NodeInfo node = new NodeInfo(config, i, project, prefix, elasticsearchVersion, sharedDir)
             nodes.add(node)
@@ -117,28 +123,42 @@ class ClusterFormationTasks {
             startTasks.add(configureNode(project, prefix, runner, dependsOn, node, config, distro, nodes.get(0)))
         }
 
-        Task wait = configureWaitTask("${prefix}#wait", project, nodes, startTasks)
+        Task wait = configureWaitTask("${prefix}#wait", project, nodes, startTasks, config.nodeStartupWaitSeconds)
         runner.dependsOn(wait)
 
         return nodes
     }
 
     /** Adds a dependency on the given distribution */
-    static void configureDistributionDependency(Project project, String distro, Configuration configuration, String elasticsearchVersion) {
+    static void configureDistributionDependency(Project project, String distro, Configuration configuration, Version elasticsearchVersion) {
+        if (elasticsearchVersion.before('6.3.0') && distro.startsWith('oss-')) {
+            distro = distro.substring('oss-'.length())
+        }
         String packaging = distro
-        if (distro == 'tar') {
-            packaging = 'tar.gz'
-        } else if (distro == 'integ-test-zip') {
+        if (distro.contains('tar')) {
+            packaging = 'tar.gz'\
+        } else if (distro.contains('zip')) {
             packaging = 'zip'
         }
-        project.dependencies.add(configuration.name, "org.elasticsearch.distribution.${distro}:elasticsearch:${elasticsearchVersion}@${packaging}")
+        String subgroup = distro
+        String artifactName = 'elasticsearch'
+        if (distro.contains('oss')) {
+            artifactName += '-oss'
+            subgroup = distro.substring('oss-'.length())
+        }
+        project.dependencies.add(configuration.name, "org.elasticsearch.distribution.${subgroup}:${artifactName}:${elasticsearchVersion}@${packaging}")
     }
 
     /** Adds a dependency on a different version of the given plugin, which will be retrieved using gradle's dependency resolution */
-    static void configureBwcPluginDependency(String name, Project project, Project pluginProject, Configuration configuration, String elasticsearchVersion) {
-        verifyProjectHasBuildPlugin(name, elasticsearchVersion, project, pluginProject)
-        PluginPropertiesExtension extension = pluginProject.extensions.findByName('esplugin');
-        project.dependencies.add(configuration.name, "org.elasticsearch.plugin:${extension.name}:${elasticsearchVersion}@zip")
+    static void configureBwcPluginDependency(Project project, Object plugin, Configuration configuration, Version elasticsearchVersion) {
+        if (plugin instanceof Project) {
+            Project pluginProject = (Project)plugin
+            verifyProjectHasBuildPlugin(configuration.name, elasticsearchVersion, project, pluginProject)
+            final String pluginName = findPluginName(pluginProject)
+            project.dependencies.add(configuration.name, "org.elasticsearch.plugin:${pluginName}:${elasticsearchVersion}@zip")
+        } else {
+            project.dependencies.add(configuration.name, "${plugin}@zip")
+        }
     }
 
     /**
@@ -165,17 +185,20 @@ class ClusterFormationTasks {
         Task setup = project.tasks.create(name: taskName(prefix, node, 'clean'), type: Delete, dependsOn: dependsOn) {
             delete node.homeDir
             delete node.cwd
+        }
+        setup = project.tasks.create(name: taskName(prefix, node, 'createCwd'), type: DefaultTask, dependsOn: setup) {
             doLast {
                 node.cwd.mkdirs()
             }
+            outputs.dir node.cwd
         }
-
         setup = configureCheckPreviousTask(taskName(prefix, node, 'checkPrevious'), project, setup, node)
         setup = configureStopTask(taskName(prefix, node, 'stopPrevious'), project, setup, node)
         setup = configureExtractTask(taskName(prefix, node, 'extract'), project, setup, node, distribution)
         setup = configureWriteConfigTask(taskName(prefix, node, 'configure'), project, setup, node, seedNode)
         setup = configureCreateKeystoreTask(taskName(prefix, node, 'createKeystore'), project, setup, node)
         setup = configureAddKeystoreSettingTasks(prefix, project, setup, node)
+        setup = configureAddKeystoreFileTasks(prefix, project, setup, node)
 
         if (node.config.plugins.isEmpty() == false) {
             if (node.nodeVersion == VersionProperties.elasticsearch) {
@@ -192,9 +215,9 @@ class ClusterFormationTasks {
         }
 
         // install plugins
-        for (Map.Entry<String, Project> plugin : node.config.plugins.entrySet()) {
-            String actionName = pluginTaskName('install', plugin.getKey(), 'Plugin')
-            setup = configureInstallPluginTask(taskName(prefix, node, actionName), project, setup, node, plugin.getValue(), prefix)
+        for (String pluginName : node.config.plugins.keySet()) {
+            String actionName = pluginTaskName('install', pluginName, 'Plugin')
+            setup = configureInstallPluginTask(taskName(prefix, node, actionName), project, setup, node, pluginName, prefix)
         }
 
         // sets up any extra config files that need to be copied over to the ES instance;
@@ -205,7 +228,19 @@ class ClusterFormationTasks {
         for (Map.Entry<String, Object[]> command : node.config.setupCommands.entrySet()) {
             // the first argument is the actual script name, relative to home
             Object[] args = command.getValue().clone()
-            args[0] = new File(node.homeDir, args[0].toString())
+            final Object commandPath
+            if (Os.isFamily(Os.FAMILY_WINDOWS)) {
+                /*
+                 * We have to delay building the string as the path will not exist during configuration which will fail on Windows due to
+                 * getting the short name requiring the path to already exist. Note that we have to capture the value of arg[0] now
+                 * otherwise we would stack overflow later since arg[0] is replaced below.
+                 */
+                String argsZero = args[0]
+                commandPath = "${-> Paths.get(NodeInfo.getShortPathName(node.homeDir.toString())).resolve(argsZero.toString()).toString()}"
+            } else {
+                commandPath = node.homeDir.toPath().resolve(args[0].toString()).toString()
+            }
+            args[0] = commandPath
             setup = configureExecTask(taskName(prefix, node, command.getKey()), project, setup, node, args)
         }
 
@@ -239,6 +274,7 @@ class ClusterFormationTasks {
         switch (node.config.distribution) {
             case 'integ-test-zip':
             case 'zip':
+            case 'oss-zip':
                 extract = project.tasks.create(name: name, type: Copy, dependsOn: extractDependsOn) {
                     from {
                         project.zipTree(configuration.singleFile)
@@ -247,38 +283,12 @@ class ClusterFormationTasks {
                 }
                 break;
             case 'tar':
+            case 'oss-tar':
                 extract = project.tasks.create(name: name, type: Copy, dependsOn: extractDependsOn) {
                     from {
                         project.tarTree(project.resources.gzip(configuration.singleFile))
                     }
                     into node.baseDir
-                }
-                break;
-            case 'rpm':
-                File rpmDatabase = new File(node.baseDir, 'rpm-database')
-                File rpmExtracted = new File(node.baseDir, 'rpm-extracted')
-                /* Delay reading the location of the rpm file until task execution */
-                Object rpm = "${ -> configuration.singleFile}"
-                extract = project.tasks.create(name: name, type: LoggedExec, dependsOn: extractDependsOn) {
-                    commandLine 'rpm', '--badreloc', '--nodeps', '--noscripts', '--notriggers',
-                        '--dbpath', rpmDatabase,
-                        '--relocate', "/=${rpmExtracted}",
-                        '-i', rpm
-                    doFirst {
-                        rpmDatabase.deleteDir()
-                        rpmExtracted.deleteDir()
-                    }
-                }
-                break;
-            case 'deb':
-                /* Delay reading the location of the deb file until task execution */
-                File debExtracted = new File(node.baseDir, 'deb-extracted')
-                Object deb = "${ -> configuration.singleFile}"
-                extract = project.tasks.create(name: name, type: LoggedExec, dependsOn: extractDependsOn) {
-                    commandLine 'dpkg-deb', '-x', deb, debExtracted
-                    doFirst {
-                        debExtracted.deleteDir()
-                    }
                 }
                 break;
             default:
@@ -298,13 +308,14 @@ class ClusterFormationTasks {
                 // Define a node attribute so we can test that it exists
                 'node.attr.testattr'           : 'test'
         ]
-        // we set min master nodes to the total number of nodes in the cluster and
-        // basically skip initial state recovery to allow the cluster to form using a realistic master election
-        // this means all nodes must be up, join the seed node and do a master election. This will also allow new and
-        // old nodes in the BWC case to become the master
-        if (node.config.useMinimumMasterNodes && node.config.numNodes > 1) {
-            esConfig['discovery.zen.minimum_master_nodes'] = node.config.numNodes
-            esConfig['discovery.initial_state_timeout'] = '0s' // don't wait for state.. just start up quickly
+        int minimumMasterNodes = node.config.minimumMasterNodes.call()
+        if (minimumMasterNodes > 0) {
+            esConfig['discovery.zen.minimum_master_nodes'] = minimumMasterNodes
+        }
+        if (node.config.numNodes > 1) {
+            // don't wait for state.. just start up quickly
+            // this will also allow new and old nodes in the BWC case to become the master
+            esConfig['discovery.initial_state_timeout'] = '0s'
         }
         esConfig['node.max_local_storage_nodes'] = node.config.numNodes
         esConfig['http.port'] = node.config.httpPort
@@ -312,6 +323,11 @@ class ClusterFormationTasks {
         // Default the watermarks to absurdly low to prevent the tests from failing on nodes without enough disk space
         esConfig['cluster.routing.allocation.disk.watermark.low'] = '1b'
         esConfig['cluster.routing.allocation.disk.watermark.high'] = '1b'
+        if (node.nodeVersion.major >= 6) {
+            esConfig['cluster.routing.allocation.disk.watermark.flood_stage'] = '1b'
+        }
+        // increase script compilation limit since tests can rapid-fire script compilations
+        esConfig['script.max_compilations_rate'] = '2048/1m'
         esConfig.putAll(node.config.settings)
 
         Task writeConfig = project.tasks.create(name: name, type: DefaultTask, dependsOn: setup)
@@ -320,7 +336,7 @@ class ClusterFormationTasks {
             if (unicastTransportUri != null) {
                 esConfig['discovery.zen.ping.unicast.hosts'] = "\"${unicastTransportUri}\""
             }
-            File configFile = new File(node.confDir, 'elasticsearch.yml')
+            File configFile = new File(node.pathConf, 'elasticsearch.yml')
             logger.info("Configuring ${configFile}")
             configFile.setText(esConfig.collect { key, value -> "${key}: ${value}" }.join('\n'), 'UTF-8')
         }
@@ -328,10 +344,14 @@ class ClusterFormationTasks {
 
     /** Adds a task to create keystore */
     static Task configureCreateKeystoreTask(String name, Project project, Task setup, NodeInfo node) {
-        if (node.config.keystoreSettings.isEmpty()) {
+        if (node.config.keystoreSettings.isEmpty() && node.config.keystoreFiles.isEmpty()) {
             return setup
         } else {
-            File esKeystoreUtil = Paths.get(node.homeDir.toString(), "bin/" + "elasticsearch-keystore").toFile()
+            /*
+             * We have to delay building the string as the path will not exist during configuration which will fail on Windows due to
+             * getting the short name requiring the path to already exist.
+             */
+            final Object esKeystoreUtil = "${-> node.binPath().resolve('elasticsearch-keystore').toString()}"
             return configureExecTask(name, project, setup, node, esKeystoreUtil, 'create')
         }
     }
@@ -339,14 +359,50 @@ class ClusterFormationTasks {
     /** Adds tasks to add settings to the keystore */
     static Task configureAddKeystoreSettingTasks(String parent, Project project, Task setup, NodeInfo node) {
         Map kvs = node.config.keystoreSettings
-        File esKeystoreUtil = Paths.get(node.homeDir.toString(), "bin/" + "elasticsearch-keystore").toFile()
         Task parentTask = setup
+        /*
+         * We have to delay building the string as the path will not exist during configuration which will fail on Windows due to getting
+         * the short name requiring the path to already exist.
+         */
+        final Object esKeystoreUtil = "${-> node.binPath().resolve('elasticsearch-keystore').toString()}"
         for (Map.Entry<String, String> entry in kvs) {
             String key = entry.getKey()
             String name = taskName(parent, node, 'addToKeystore#' + key)
             Task t = configureExecTask(name, project, parentTask, node, esKeystoreUtil, 'add', key, '-x')
+            String settingsValue = entry.getValue() // eval this early otherwise it will not use the right value
             t.doFirst {
-                standardInput = new ByteArrayInputStream(entry.getValue().getBytes(StandardCharsets.UTF_8))
+                standardInput = new ByteArrayInputStream(settingsValue.getBytes(StandardCharsets.UTF_8))
+            }
+            parentTask = t
+        }
+        return parentTask
+    }
+
+    /** Adds tasks to add files to the keystore */
+    static Task configureAddKeystoreFileTasks(String parent, Project project, Task setup, NodeInfo node) {
+        Map<String, Object> kvs = node.config.keystoreFiles
+        if (kvs.isEmpty()) {
+            return setup
+        }
+        Task parentTask = setup
+        /*
+         * We have to delay building the string as the path will not exist during configuration which will fail on Windows due to getting
+         * the short name requiring the path to already exist.
+         */
+        final Object esKeystoreUtil = "${-> node.binPath().resolve('elasticsearch-keystore').toString()}"
+        for (Map.Entry<String, Object> entry in kvs) {
+            String key = entry.getKey()
+            String name = taskName(parent, node, 'addToKeystore#' + key)
+            String srcFileName = entry.getValue()
+            Task t = configureExecTask(name, project, parentTask, node, esKeystoreUtil, 'add-file', key, srcFileName)
+            t.doFirst {
+                File srcFile = project.file(srcFileName)
+                if (srcFile.isDirectory()) {
+                    throw new GradleException("Source for keystoreFile must be a file: ${srcFile}")
+                }
+                if (srcFile.exists() == false) {
+                    throw new GradleException("Source file for keystoreFile does not exist: ${srcFile}")
+                }
             }
             parentTask = t
         }
@@ -393,31 +449,40 @@ class ClusterFormationTasks {
         Copy copyPlugins = project.tasks.create(name: name, type: Copy, dependsOn: setup)
 
         List<FileCollection> pluginFiles = []
-        for (Map.Entry<String, Project> plugin : node.config.plugins.entrySet()) {
+        for (Map.Entry<String, Object> plugin : node.config.plugins.entrySet()) {
 
-            Project pluginProject = plugin.getValue()
-            verifyProjectHasBuildPlugin(name, node.nodeVersion, project, pluginProject)
-            String configurationName = "_plugin_${prefix}_${pluginProject.path}"
+            String configurationName = pluginConfigurationName(prefix, plugin.key)
             Configuration configuration = project.configurations.findByName(configurationName)
             if (configuration == null) {
                 configuration = project.configurations.create(configurationName)
             }
-            project.dependencies.add(configurationName, project.dependencies.project(path: pluginProject.path, configuration: 'zip'))
-            setup.dependsOn(pluginProject.tasks.bundlePlugin)
 
-            // also allow rest tests to use the rest spec from the plugin
-            String copyRestSpecTaskName = pluginTaskName('copy', plugin.getKey(), 'PluginRestSpec')
-            Copy copyRestSpec = project.tasks.findByName(copyRestSpecTaskName)
-            for (File resourceDir : pluginProject.sourceSets.test.resources.srcDirs) {
-                File restApiDir = new File(resourceDir, 'rest-api-spec/api')
-                if (restApiDir.exists() == false) continue
-                if (copyRestSpec == null) {
-                    copyRestSpec = project.tasks.create(name: copyRestSpecTaskName, type: Copy)
-                    copyPlugins.dependsOn(copyRestSpec)
-                    copyRestSpec.into(project.sourceSets.test.output.resourcesDir)
+            if (plugin.getValue() instanceof Project) {
+                Project pluginProject = plugin.getValue()
+                verifyProjectHasBuildPlugin(name, node.nodeVersion, project, pluginProject)
+
+                project.dependencies.add(configurationName, project.dependencies.project(path: pluginProject.path, configuration: 'zip'))
+                setup.dependsOn(pluginProject.tasks.bundlePlugin)
+
+                // also allow rest tests to use the rest spec from the plugin
+                String copyRestSpecTaskName = pluginTaskName('copy', plugin.getKey(), 'PluginRestSpec')
+                Copy copyRestSpec = project.tasks.findByName(copyRestSpecTaskName)
+                for (File resourceDir : pluginProject.sourceSets.test.resources.srcDirs) {
+                    File restApiDir = new File(resourceDir, 'rest-api-spec/api')
+                    if (restApiDir.exists() == false) continue
+                    if (copyRestSpec == null) {
+                        copyRestSpec = project.tasks.create(name: copyRestSpecTaskName, type: Copy)
+                        copyPlugins.dependsOn(copyRestSpec)
+                        copyRestSpec.into(project.sourceSets.test.output.resourcesDir)
+                    }
+                    copyRestSpec.from(resourceDir).include('rest-api-spec/api/**')
                 }
-                copyRestSpec.from(resourceDir).include('rest-api-spec/api/**')
+            } else {
+                project.dependencies.add(configurationName, "${plugin.getValue()}@zip")
             }
+
+
+
             pluginFiles.add(configuration)
         }
 
@@ -426,24 +491,37 @@ class ClusterFormationTasks {
         return copyPlugins
     }
 
+    private static String pluginConfigurationName(final String prefix, final String name) {
+        return "_plugin_${prefix}_${name}".replace(':', '_')
+    }
+
+    private static String pluginBwcConfigurationName(final String prefix, final String name) {
+        return "_plugin_bwc_${prefix}_${name}".replace(':', '_')
+    }
+
     /** Configures task to copy a plugin based on a zip file resolved using dependencies for an older version */
     static Task configureCopyBwcPluginsTask(String name, Project project, Task setup, NodeInfo node, String prefix) {
         Configuration bwcPlugins = project.configurations.getByName("${prefix}_elasticsearchBwcPlugins")
-        for (Map.Entry<String, Project> plugin : node.config.plugins.entrySet()) {
-            Project pluginProject = plugin.getValue()
-            verifyProjectHasBuildPlugin(name, node.nodeVersion, project, pluginProject)
-            String configurationName = "_plugin_bwc_${prefix}_${pluginProject.path}"
+        for (Map.Entry<String, Object> plugin : node.config.plugins.entrySet()) {
+            String configurationName = pluginBwcConfigurationName(prefix, plugin.key)
             Configuration configuration = project.configurations.findByName(configurationName)
             if (configuration == null) {
                 configuration = project.configurations.create(configurationName)
             }
 
-            final String depName = pluginProject.extensions.findByName('esplugin').name
+            if (plugin.getValue() instanceof Project) {
+                Project pluginProject = plugin.getValue()
+                verifyProjectHasBuildPlugin(name, node.nodeVersion, project, pluginProject)
 
-            Dependency dep = bwcPlugins.dependencies.find {
-                it.name == depName
+                final String depName = findPluginName(pluginProject)
+
+                Dependency dep = bwcPlugins.dependencies.find {
+                    it.name == depName
+                }
+                configuration.dependencies.add(dep)
+            } else {
+                project.dependencies.add(configurationName, "${plugin.getValue()}@zip")
             }
-            configuration.dependencies.add(dep)
         }
 
         Copy copyPlugins = project.tasks.create(name: name, type: Copy, dependsOn: setup) {
@@ -462,21 +540,27 @@ class ClusterFormationTasks {
         }
         Copy installModule = project.tasks.create(name, Copy.class)
         installModule.dependsOn(setup)
+        installModule.dependsOn(module.tasks.bundlePlugin)
         installModule.into(new File(node.homeDir, "modules/${module.name}"))
         installModule.from({ project.zipTree(module.tasks.bundlePlugin.outputs.files.singleFile) })
         return installModule
     }
 
-    static Task configureInstallPluginTask(String name, Project project, Task setup, NodeInfo node, Project plugin, String prefix) {
+    static Task configureInstallPluginTask(String name, Project project, Task setup, NodeInfo node, String pluginName, String prefix) {
         final FileCollection pluginZip;
         if (node.nodeVersion != VersionProperties.elasticsearch) {
-            pluginZip = project.configurations.getByName("_plugin_bwc_${prefix}_${plugin.path}")
+            pluginZip = project.configurations.getByName(pluginBwcConfigurationName(prefix, pluginName))
         } else {
-            pluginZip = project.configurations.getByName("_plugin_${prefix}_${plugin.path}")
+            pluginZip = project.configurations.getByName(pluginConfigurationName(prefix, pluginName))
         }
         // delay reading the file location until execution time by wrapping in a closure within a GString
-        Object file = "${-> new File(node.pluginsTmpDir, pluginZip.singleFile.getName()).toURI().toURL().toString()}"
-        Object[] args = [new File(node.homeDir, 'bin/elasticsearch-plugin'), 'install', file]
+        final Object file = "${-> new File(node.pluginsTmpDir, pluginZip.singleFile.getName()).toURI().toURL().toString()}"
+        /*
+         * We have to delay building the string as the path will not exist during configuration which will fail on Windows due to getting
+         * the short name requiring the path to already exist.
+         */
+        final Object esPluginUtil = "${-> node.binPath().resolve('elasticsearch-plugin').toString()}"
+        final Object[] args = [esPluginUtil, 'install', '--batch', file]
         return configureExecTask(name, project, setup, node, args)
     }
 
@@ -498,16 +582,17 @@ class ClusterFormationTasks {
 
     /** Adds a task to execute a command to help setup the cluster */
     static Task configureExecTask(String name, Project project, Task setup, NodeInfo node, Object[] execArgs) {
-        return project.tasks.create(name: name, type: LoggedExec, dependsOn: setup) {
-            workingDir node.cwd
+        return project.tasks.create(name: name, type: LoggedExec, dependsOn: setup) { Exec exec ->
+            exec.workingDir node.cwd
+            exec.environment 'JAVA_HOME', node.getJavaHome()
             if (Os.isFamily(Os.FAMILY_WINDOWS)) {
-                executable 'cmd'
-                args '/C', 'call'
+                exec.executable 'cmd'
+                exec.args '/C', 'call'
                 // On Windows the comma character is considered a parameter separator:
                 // argument are wrapped in an ExecArgWrapper that escapes commas
-                args execArgs.collect { a -> new EscapeCommaWrapper(arg: a) }
+                exec.args execArgs.collect { a -> new EscapeCommaWrapper(arg: a) }
             } else {
-                commandLine execArgs
+                exec.commandLine execArgs
             }
         }
     }
@@ -554,14 +639,17 @@ class ClusterFormationTasks {
         }
 
         Task start = project.tasks.create(name: name, type: DefaultTask, dependsOn: setup)
+        if (node.javaVersion != null) {
+            BuildPlugin.requireJavaHome(start, node.javaVersion)
+        }
         start.doLast(elasticsearchRunner)
         return start
     }
 
-    static Task configureWaitTask(String name, Project project, List<NodeInfo> nodes, List<Task> startTasks) {
+    static Task configureWaitTask(String name, Project project, List<NodeInfo> nodes, List<Task> startTasks, int waitSeconds) {
         Task wait = project.tasks.create(name: name, dependsOn: startTasks)
         wait.doLast {
-            ant.waitfor(maxwait: '30', maxwaitunit: 'second', checkevery: '500', checkeveryunit: 'millisecond', timeoutproperty: "failed${name}") {
+            ant.waitfor(maxwait: "${waitSeconds}", maxwaitunit: 'second', checkevery: '500', checkeveryunit: 'millisecond', timeoutproperty: "failed${name}") {
                 or {
                     for (NodeInfo node : nodes) {
                         resourceexists {
@@ -583,12 +671,30 @@ class ClusterFormationTasks {
                     }
                 }
             }
+            if (ant.properties.containsKey("failed${name}".toString())) {
+                waitFailed(project, nodes, logger, "Failed to start elasticsearch: timed out after ${waitSeconds} seconds")
+            }
+
             boolean anyNodeFailed = false
             for (NodeInfo node : nodes) {
-                anyNodeFailed |= node.failedMarker.exists()
+                if (node.failedMarker.exists()) {
+                    logger.error("Failed to start elasticsearch: ${node.failedMarker.toString()} exists")
+                    anyNodeFailed = true
+                }
             }
-            if (ant.properties.containsKey("failed${name}".toString()) || anyNodeFailed) {
+            if (anyNodeFailed) {
                 waitFailed(project, nodes, logger, 'Failed to start elasticsearch')
+            }
+
+            // make sure all files exist otherwise we haven't fully started up
+            boolean missingFile = false
+            for (NodeInfo node : nodes) {
+                missingFile |= node.pidFile.exists() == false
+                missingFile |= node.httpPortsFile.exists() == false
+                missingFile |= node.transportPortsFile.exists() == false
+            }
+            if (missingFile) {
+                waitFailed(project, nodes, logger, 'Elasticsearch did not complete startup in time allotted')
             }
 
             // go through each node checking the wait condition
@@ -638,7 +744,7 @@ class ClusterFormationTasks {
                 String pid = node.pidFile.getText('UTF-8')
                 ByteArrayOutputStream output = new ByteArrayOutputStream()
                 project.exec {
-                    commandLine = ["${project.javaHome}/bin/jstack", pid]
+                    commandLine = ["${project.runtimeJavaHome}/bin/jstack", pid]
                     standardOutput = output
                 }
                 output.toString('UTF-8').eachLine { line -> logger.error("|    ${line}") }
@@ -682,7 +788,7 @@ class ClusterFormationTasks {
     }
 
     private static File getJpsExecutableByName(Project project, String jpsExecutableName) {
-        return Paths.get(project.javaHome.toString(), "bin/" + jpsExecutableName).toFile()
+        return Paths.get(project.runtimeJavaHome.toString(), "bin/" + jpsExecutableName).toFile()
     }
 
     /** Adds a task to kill an elasticsearch node with the given pidfile */
@@ -735,10 +841,20 @@ class ClusterFormationTasks {
         return retVal
     }
 
-    static void verifyProjectHasBuildPlugin(String name, String version, Project project, Project pluginProject) {
-        if (pluginProject.plugins.hasPlugin(PluginBuildPlugin) == false) {
+    static void verifyProjectHasBuildPlugin(String name, Version version, Project project, Project pluginProject) {
+        if (pluginProject.plugins.hasPlugin(PluginBuildPlugin) == false && pluginProject.plugins.hasPlugin(MetaPluginBuildPlugin) == false) {
             throw new GradleException("Task [${name}] cannot add plugin [${pluginProject.path}] with version [${version}] to project's " +
-                    "[${project.path}] dependencies: the plugin is not an esplugin")
+                    "[${project.path}] dependencies: the plugin is not an esplugin or es_meta_plugin")
+        }
+    }
+
+    /** Find the plugin name in the given project, whether a regular plugin or meta plugin. */
+    static String findPluginName(Project pluginProject) {
+        PluginPropertiesExtension extension = pluginProject.extensions.findByName('esplugin')
+        if (extension != null) {
+            return extension.name
+        } else {
+            return pluginProject.extensions.findByName('es_meta_plugin').name
         }
     }
 }

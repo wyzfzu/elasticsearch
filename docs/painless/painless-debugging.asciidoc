@@ -1,8 +1,6 @@
 [[painless-debugging]]
 === Painless Debugging
 
-experimental[The Painless scripting language is new and is still marked as experimental. The syntax or API may be changed in the future in non-backwards compatible ways if required.]
-
 ==== Debug.Explain
 
 Painless doesn't have a
@@ -80,7 +78,7 @@ The response looks like:
     "caused_by": {
       "type": "script_exception",
       "to_string": "{gp=[26, 82, 1], last=gaudreau, assists=[17, 46, 0], first=johnny, goals=[9, 27, 1]}",
-      "painless_class": "LinkedHashMap",
+      "painless_class": "java.util.LinkedHashMap",
       "java_class": "java.util.LinkedHashMap",
       ...
     }
